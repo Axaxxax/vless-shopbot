@@ -157,18 +157,3 @@ git pull
 docker-compose down && docker-compose up -d --build
 ```
 
-## 🙌 Баги и предложения
-
-Если вы нашли баг, или у вас есть предложение, то создавайте "Issue" или присылайте Pull Request'ы.
-
-## 💎 Поддержать разработку
-
-**СБП/Карта РФ:** https://yookassa.ru/my/i/aJRiTyq5D3VB/l
-
-**CryptoBot:** https://t.me/send?start=IVftnggXmRv8
-
-**TON:** `UQAtdMEig3Wl_D3FNx4RU3RhxnoJI3IizGxrrNj3O8Q-fDpK`
-
-**USDT (TRC20):** `TBW9TFUh93U1G5eTT1VTsZw51L669khCiz`
-
-## Я ценю любой вклад в развитие проекта ❤️
