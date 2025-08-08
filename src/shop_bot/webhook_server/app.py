@@ -20,7 +20,9 @@ from shop_bot.data_manager.database import (
     create_host, delete_host, create_plan, delete_plan, get_user_count,
     get_total_keys_count, get_total_spent_sum, get_daily_stats_for_charts,
     get_recent_transactions, get_paginated_transactions, get_all_users, get_user_keys,
-    ban_user, unban_user, delete_user_keys, get_setting, find_and_complete_ton_transaction
+    ban_user, unban_user, delete_user_keys, get_setting, find_and_complete_ton_transaction,
+    # добавим новую функцию для ручной оплаты
+    get_payment_by_id
 )
 
 _bot_controller = None
@@ -43,16 +45,6 @@ def create_webhook_app(bot_controller_instance):
     template_dir = os.path.join(app_dir, 'templates')
     template_file = os.path.join(template_dir, 'login.html')
 
-    print("--- DIAGNOSTIC INFORMATION ---", flush=True)
-    print(f"Current Working Directory: {os.getcwd()}", flush=True)
-    print(f"Path of running app.py: {app_file_path}", flush=True)
-    print(f"Directory of running app.py: {app_dir}", flush=True)
-    print(f"Expected templates directory: {template_dir}", flush=True)
-    print(f"Expected login.html path: {template_file}", flush=True)
-    print(f"Does template directory exist? -> {os.path.isdir(template_dir)}", flush=True)
-    print(f"Does login.html file exist? -> {os.path.isfile(template_file)}", flush=True)
-    print("--- END DIAGNOSTIC INFORMATION ---", flush=True)
-    
     flask_app = Flask(
         __name__,
         template_folder='templates',
@@ -256,6 +248,45 @@ def create_webhook_app(bot_controller_instance):
         delete_plan(plan_id)
         flash("Тариф успешно удален.", 'success')
         return redirect(url_for('settings_page'))
+
+    # Новый маршрут для ручного подтверждения платежей
+    @flask_app.route('/manual-payment/confirm/<int:payment_id>', methods=['POST'])
+    @login_required
+    def manual_payment_confirm(payment_id):
+        try:
+            payment = get_payment_by_id(payment_id)
+            if not payment:
+                flash(f"Платёж {payment_id} не найден.", "danger")
+                return redirect(url_for('dashboard_page'))
+
+            metadata = {
+                "user_id": payment["user_id"],
+                "months": payment["months"],
+                "price": payment["price"],
+                "action": "buy",
+                "key_id": None,
+                "host_name": payment["host_name"],
+                "plan_id": payment["plan_id"],
+                "customer_email": None,
+                "payment_method": "manual"
+            }
+
+            bot = _bot_controller.get_bot_instance()
+            loop = current_app.config.get('EVENT_LOOP')
+            payment_processor = handlers.process_successful_payment
+
+            if bot and loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(payment_processor(bot, metadata), loop)
+                flash(f"Платёж {payment_id} подтверждён, ключ выдан.", "success")
+            else:
+                flash("Бот или event loop не запущен, оплата не обработана.", "danger")
+
+            return redirect(url_for('dashboard_page'))
+
+        except Exception as e:
+            logger.error(f"Ошибка при подтверждении ручного платежа: {e}", exc_info=True)
+            flash("Произошла ошибка при подтверждении платежа.", "danger")
+            return redirect(url_for('dashboard_page'))
 
     @flask_app.route('/yookassa-webhook', methods=['POST'])
     def yookassa_webhook_handler():
