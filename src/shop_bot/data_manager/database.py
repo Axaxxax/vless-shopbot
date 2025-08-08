@@ -273,35 +273,37 @@ def get_recent_transactions(limit: int = 15) -> list[dict]:
         logging.error(f"Failed to get recent transactions: {e}")
     return transactions
 
-def get_payment_by_id(payment_id):
+def get_payment_by_id(payment_id: int) -> dict | None:
     """
     Получает данные платежа по ID.
-    Возвращает dict с ключами:
+    Возвращает словарь с ключами:
     user_id, months, price, host_name, plan_id
     """
-    from .db import get_db  # или ваш способ получения соединения
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT user_id, months, price, host_name, plan_id
+                FROM payments
+                WHERE id = ?
+            """, (payment_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
 
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT user_id, months, price, host_name, plan_id
-        FROM payments
-        WHERE id = ?
-    """, (payment_id,))
-    
-    row = cur.fetchone()
-    if row is None:
+            return {
+                "user_id": row["user_id"],
+                "months": row["months"],
+                "price": row["price"],
+                "host_name": row["host_name"],
+                "plan_id": row["plan_id"]
+            }
+    except sqlite3.Error as e:
+        logger.error(f"Failed to get payment by id {payment_id}: {e}")
         return None
-
-    return {
-        "user_id": row[0],
-        "months": row[1],
-        "price": row[2],
-        "host_name": row[3],
-        "plan_id": row[4]
-    }
-
 
 def get_all_users() -> list[dict]:
     try:
