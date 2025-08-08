@@ -21,8 +21,7 @@ from shop_bot.data_manager.database import (
     get_total_keys_count, get_total_spent_sum, get_daily_stats_for_charts,
     get_recent_transactions, get_paginated_transactions, get_all_users, get_user_keys,
     ban_user, unban_user, delete_user_keys, get_setting, find_and_complete_ton_transaction,
-    # добавим новую функцию для ручной оплаты
-    get_payment_by_id
+    get_payment_by_id  # функция для ручного подтверждения платежа
 )
 
 _bot_controller = None
@@ -40,17 +39,11 @@ def create_webhook_app(bot_controller_instance):
     global _bot_controller
     _bot_controller = bot_controller_instance
 
-    app_file_path = os.path.abspath(__file__)
-    app_dir = os.path.dirname(app_file_path)
-    template_dir = os.path.join(app_dir, 'templates')
-    template_file = os.path.join(template_dir, 'login.html')
-
     flask_app = Flask(
         __name__,
         template_folder='templates',
         static_folder='static'
     )
-    
     flask_app.config['SECRET_KEY'] = 'lolkek4eburek'
 
     @flask_app.context_processor
@@ -143,8 +136,8 @@ def create_webhook_app(bot_controller_instance):
                 update_setting('panel_password', request.form.get('panel_password'))
             
             for key in ALL_SETTINGS_KEYS:
-                if key == 'panel_password': continue
-
+                if key == 'panel_password': 
+                    continue
                 if key in ['sbp_enabled', 'force_subscription']:
                     value = 'true' if key in request.form else 'false'
                     update_setting(key, value)
@@ -249,7 +242,7 @@ def create_webhook_app(bot_controller_instance):
         flash("Тариф успешно удален.", 'success')
         return redirect(url_for('settings_page'))
 
-    # Новый маршрут для ручного подтверждения платежей
+    # ---------------- Ручное подтверждение платежа ----------------
     @flask_app.route('/manual-payment/confirm/<int:payment_id>', methods=['POST'])
     @login_required
     def manual_payment_confirm(payment_id):
@@ -259,17 +252,22 @@ def create_webhook_app(bot_controller_instance):
                 flash(f"Платёж {payment_id} не найден.", "danger")
                 return redirect(url_for('dashboard_page'))
 
-            metadata = {
-                "user_id": payment["user_id"],
-                "months": payment["months"],
-                "price": payment["price"],
-                "action": "buy",
-                "key_id": None,
-                "host_name": payment["host_name"],
-                "plan_id": payment["plan_id"],
-                "customer_email": None,
-                "payment_method": "manual"
-            }
+            try:
+                metadata = {
+                    "user_id": payment["user_id"],
+                    "months": payment["months"],
+                    "price": payment["price"],
+                    "action": "buy",
+                    "key_id": None,
+                    "host_name": payment["host_name"],
+                    "plan_id": payment["plan_id"],
+                    "customer_email": None,
+                    "payment_method": "manual"
+                }
+            except KeyError as ke:
+                logger.error(f"Отсутствует поле {ke} в платеже ID {payment_id}")
+                flash("Ошибка в данных платежа.", "danger")
+                return redirect(url_for('dashboard_page'))
 
             bot = _bot_controller.get_bot_instance()
             loop = current_app.config.get('EVENT_LOOP')
@@ -281,12 +279,12 @@ def create_webhook_app(bot_controller_instance):
             else:
                 flash("Бот или event loop не запущен, оплата не обработана.", "danger")
 
-            return redirect(url_for('dashboard_page'))
-
         except Exception as e:
             logger.error(f"Ошибка при подтверждении ручного платежа: {e}", exc_info=True)
             flash("Произошла ошибка при подтверждении платежа.", "danger")
-            return redirect(url_for('dashboard_page'))
+
+        return redirect(url_for('dashboard_page'))
+
 
     @flask_app.route('/yookassa-webhook', methods=['POST'])
     def yookassa_webhook_handler():
