@@ -273,6 +273,36 @@ def get_recent_transactions(limit: int = 15) -> list[dict]:
         logging.error(f"Failed to get recent transactions: {e}")
     return transactions
 
+def get_payment_by_id(payment_id):
+    """
+    Получает данные платежа по ID.
+    Возвращает dict с ключами:
+    user_id, months, price, host_name, plan_id
+    """
+    from .db import get_db  # или ваш способ получения соединения
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT user_id, months, price, host_name, plan_id
+        FROM payments
+        WHERE id = ?
+    """, (payment_id,))
+    
+    row = cur.fetchone()
+    if row is None:
+        return None
+
+    return {
+        "user_id": row[0],
+        "months": row[1],
+        "price": row[2],
+        "host_name": row[3],
+        "plan_id": row[4]
+    }
+
+
 def get_all_users() -> list[dict]:
     try:
         with sqlite3.connect(DB_FILE) as conn:
