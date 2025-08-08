@@ -79,6 +79,42 @@ def log_transaction(username: str, transaction_id: str | None, payment_id: str |
             conn.commit()
     except sqlite3.Error as e:
         logging.error(f"Failed to log transaction for user {user_id}: {e}")
+def get_payment_by_id(payment_id: int) -> dict | None:
+    """
+    Возвращает словарь с user_id, months, price, host_name, plan_id
+    по ID платежа из таблицы transactions.
+    """
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT 
+                    user_id,
+                    CAST(json_extract(metadata, '$.months') AS INTEGER) AS months,
+                    CAST(amount_rub AS REAL) AS price,
+                    json_extract(metadata, '$.host_name') AS host_name,
+                    json_extract(metadata, '$.plan_id') AS plan_id
+                FROM transactions
+                WHERE id = ?
+                LIMIT 1
+            """, (payment_id,))
+            
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "user_id": row["user_id"],
+                    "months": row["months"],
+                    "price": row["price"],
+                    "host_name": row["host_name"],
+                    "plan_id": row["plan_id"]
+                }
+            return None
+    except sqlite3.Error as e:
+        logger.error(f"Failed to get payment by id {payment_id}: {e}")
+        return None
+
 
 def get_paginated_transactions(page: int = 1, per_page: int = 15) -> tuple[list[dict], int]:
     offset = (page - 1) * per_page
