@@ -1,13 +1,398 @@
 import sqlite3
-import json
-import logging
 from datetime import datetime
+import logging
+from pathlib import Path
+import json
 
-DB_FILE = 'your_database.db'  # Замените на путь к вашей базе данных SQLite
-
-# Конфигурация логирования
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path("/app/project")
+DB_FILE = PROJECT_ROOT / "users.db"
+
+def initialize_db():
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    telegram_id INTEGER PRIMARY KEY, username TEXT, total_spent REAL DEFAULT 0,
+                    total_months INTEGER DEFAULT 0, trial_used BOOLEAN DEFAULT 0,
+                    agreed_to_terms BOOLEAN DEFAULT 0,
+                    registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_banned BOOLEAN DEFAULT 0,
+                    referred_by INTEGER,
+                    referral_balance REAL DEFAULT 0
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS vpn_keys (
+                    key_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    host_name TEXT NOT NULL,
+                    xui_client_uuid TEXT NOT NULL,
+                    key_email TEXT NOT NULL UNIQUE,
+                    expiry_date TIMESTAMP,
+                    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS transactions (
+                    username TEXT,
+                    transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    payment_id TEXT UNIQUE NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    amount_rub REAL NOT NULL,
+                    amount_currency REAL,
+                    currency_name TEXT,
+                    payment_method TEXT,
+                    metadata TEXT,
+                    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS xui_hosts(
+                    host_name TEXT NOT NULL,
+                    host_url TEXT NOT NULL,
+                    host_username TEXT NOT NULL,
+                    host_pass TEXT NOT NULL,
+                    host_inbound_id INTEGER NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS plans (
+                    plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host_name TEXT NOT NULL,
+                    plan_name TEXT NOT NULL,
+                    months INTEGER NOT NULL,
+                    price REAL NOT NULL,
+                    FOREIGN KEY (host_name) REFERENCES xui_hosts (host_name)
+                )
+            ''')            
+            default_settings = {
+                "panel_login": "admin",
+                "panel_password": "admin",
+                "about_text": None,
+                "terms_url": None,
+                "privacy_url": None,
+                "support_user": None,
+                "support_text": None,
+                "channel_url": None,
+                "force_subscription": "true",
+                "receipt_email": "example@example.com",
+                "telegram_bot_token": None,
+                "telegram_bot_username": None,
+                "referral_percentage": "10",
+                "referral_discount": "5",
+                "admin_telegram_id": None,
+                "yookassa_shop_id": None,
+                "yookassa_secret_key": None,
+                "sbp_enabled": "false",
+                "cryptobot_token": None,
+                "heleket_merchant_id": None,
+                "heleket_api_key": None,
+                "domain": None,
+                "ton_wallet_address": None,
+                "tonapi_key": None,
+            }
+            run_migration()
+            for key, value in default_settings.items():
+                cursor.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES (?, ?)", (key, value))
+            conn.commit()
+            logging.info("Database initialized successfully.")
+    except sqlite3.Error as e:
+        logging.error(f"Database error on initialization: {e}")
+
+def run_migration():
+    if not DB_FILE.exists():
+        logging.error("Users.db database file was not found. There is nothing to migrate.")
+        return
+
+    logging.info(f"Starting the migration of the database: {DB_FILE}")
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        logging.info("The migration of the table 'users' ...")
+    
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        if 'referred_by' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+            logging.info(" -> The column 'referred_by' is successfully added.")
+        else:
+            logging.info(" -> The column 'referred_by' already exists.")
+            
+        if 'referral_balance' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN referral_balance REAL DEFAULT 0")
+            logging.info(" -> The column 'referral_balance' is successfully added.")
+        else:
+            logging.info(" -> The column 'referral_balance' already exists.")
+        
+        logging.info("The table 'users' has been successfully updated.")
+
+        logging.info("The migration of the table 'Transactions' ...")
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'")
+        table_exists = cursor.fetchone()
+
+        if table_exists:
+            cursor.execute("PRAGMA table_info(transactions)")
+            trans_columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'payment_id' in trans_columns and 'status' in trans_columns and 'username' in trans_columns:
+                logging.info("The 'Transactions' table already has a new structure. Migration is not required.")
+            else:
+                backup_name = f"transactions_backup_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                logging.warning(f"The old structure of the TRANSACTIONS table was discovered. I rename in '{backup_name}' ...")
+                cursor.execute(f"ALTER TABLE transactions RENAME TO {backup_name}")
+                
+                logging.info("I create a new table 'Transactions' with the correct structure ...")
+                create_new_transactions_table(cursor)
+                logging.info("The new table 'Transactions' has been successfully created. The old data is saved.")
+        else:
+            logging.info("TRANSACTIONS table was not found. I create a new one ...")
+            create_new_transactions_table(cursor)
+            logging.info("The new table 'Transactions' has been successfully created.")
+
+        conn.commit()
+        conn.close()
+        
+        logging.info("--- The database is successfully completed! ---")
+
+    except sqlite3.Error as e:
+        logging.error(f"An error occurred during migration: {e}")
+
+def create_new_transactions_table(cursor: sqlite3.Cursor):
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            username TEXT,
+            transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payment_id TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            amount_rub REAL NOT NULL,
+            amount_currency REAL,
+            currency_name TEXT,
+            payment_method TEXT,
+            metadata TEXT,
+            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+def create_host(name: str, url: str, user: str, passwd: str, inbound: int):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO xui_hosts (host_name, host_url, host_username, host_pass, host_inbound_id) VALUES (?, ?, ?, ?, ?)",
+                (name, url, user, passwd, inbound)
+            )
+            conn.commit()
+            logging.info(f"Successfully created a new host: {name}")
+    except sqlite3.Error as e:
+        logging.error(f"Error creating host '{name}': {e}")
+
+def delete_host(host_name: str):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM plans WHERE host_name = ?", (host_name,))
+            cursor.execute("DELETE FROM xui_hosts WHERE host_name = ?", (host_name,))
+            conn.commit()
+            logging.info(f"Successfully deleted host '{host_name}' and its plans.")
+    except sqlite3.Error as e:
+        logging.error(f"Error deleting host '{host_name}': {e}")
+
+def get_host(host_name: str) -> dict | None:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM xui_hosts WHERE host_name = ?", (host_name,))
+            result = cursor.fetchone()
+            return dict(result) if result else None
+    except sqlite3.Error as e:
+        logging.error(f"Error getting host '{host_name}': {e}")
+        return None
+
+def get_all_hosts() -> list[dict]:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM xui_hosts")
+            hosts = cursor.fetchall()
+            return [dict(row) for row in hosts]
+    except sqlite3.Error as e:
+        logging.error(f"Error getting list of all hosts: {e}")
+        return []
+
+def get_setting(key: str) -> str | None:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+    except sqlite3.Error as e:
+        logging.error(f"Failed to get setting '{key}': {e}")
+        return None
+        
+def get_all_settings() -> dict:
+    settings = {}
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT key, value FROM bot_settings")
+            rows = cursor.fetchall()
+            for row in rows:
+                settings[row['key']] = row['value']
+    except sqlite3.Error as e:
+        logging.error(f"Failed to get all settings: {e}")
+    return settings
+
+def update_setting(key: str, value: str):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE bot_settings SET value = ? WHERE key = ?", (value, key))
+            conn.commit()
+            logging.info(f"Setting '{key}' updated.")
+    except sqlite3.Error as e:
+        logging.error(f"Failed to update setting '{key}': {e}")
+
+def create_plan(host_name: str, plan_name: str, months: int, price: float):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO plans (host_name, plan_name, months, price) VALUES (?, ?, ?, ?)",
+                (host_name, plan_name, months, price)
+            )
+            conn.commit()
+            logging.info(f"Created new plan '{plan_name}' for host '{host_name}'.")
+    except sqlite3.Error as e:
+        logging.error(f"Failed to create plan for host '{host_name}': {e}")
+
+def get_plans_for_host(host_name: str) -> list[dict]:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM plans WHERE host_name = ? ORDER BY months", (host_name,))
+            plans = cursor.fetchall()
+            return [dict(plan) for plan in plans]
+    except sqlite3.Error as e:
+        logging.error(f"Failed to get plans for host '{host_name}': {e}")
+        return []
+
+def get_plan_by_id(plan_id: int) -> dict | None:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM plans WHERE plan_id = ?", (plan_id,))
+            plan = cursor.fetchone()
+            return dict(plan) if plan else None
+    except sqlite3.Error as e:
+        logging.error(f"Failed to get plan by id '{plan_id}': {e}")
+        return None
+
+def delete_plan(plan_id: int):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM plans WHERE plan_id = ?", (plan_id,))
+            conn.commit()
+            logging.info(f"Deleted plan with id {plan_id}.")
+    except sqlite3.Error as e:
+        logging.error(f"Failed to delete plan with id {plan_id}: {e}")
+
+def register_user_if_not_exists(telegram_id: int, username: str, referrer_id):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id FROM users WHERE telegram_id = ?", (telegram_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO users (telegram_id, username, registration_date, referred_by) VALUES (?, ?, ?, ?)",
+                    (telegram_id, username, datetime.now(), referrer_id)
+                )
+            else:
+                cursor.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
+            conn.commit()
+    except sqlite3.Error as e:
+        logging.error(f"Failed to register user {telegram_id}: {e}")
+
+def add_to_referral_balance(user_id: int, amount: float):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET referral_balance = referral_balance + ? WHERE telegram_id = ?", (amount, user_id))
+            conn.commit()
+    except sqlite3.Error as e:
+        logging.error(f"Failed to add to referral balance for user {user_id}: {e}")
+
+def get_referral_count(user_id: int) -> int:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
+            return cursor.fetchone()[0] or 0
+    except sqlite3.Error as e:
+        logging.error(f"Failed to get referral count for user {user_id}: {e}")
+        return 0
+
+def get_user(telegram_id: int):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+            user_data = cursor.fetchone()
+            return dict(user_data) if user_data else None
+    except sqlite3.Error as e:
+        logging.error(f"Failed to get user {telegram_id}: {e}")
+        return None
+
+def set_terms_agreed(telegram_id: int):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET agreed_to_terms = 1 WHERE telegram_id = ?", (telegram_id,))
+            conn.commit()
+            logging.info(f"User {telegram_id} has agreed to terms.")
+    except sqlite3.Error as e:
+        logging.error(f"Failed to set terms agreed for user {telegram_id}: {e}")
+
+def update_user_stats(telegram_id: int, amount_spent: float, months_purchased: int):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET total_spent = total_spent + ?, total_months = total_months + ? WHERE telegram_id = ?", (amount_spent, months_purchased, telegram_id))
+            conn.commit()
+    except sqlite3.Error as e:
+        logging.error(f"Failed to update user stats for {telegram_id}: {e}")
+
+def get_user_count() -> int:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM users")
+            return cursor.fetchone()[0] or 0
+    except sqlite3.Error as e:
+        logging.error(f"Failed to get user count: {e}")
+        return 0
 
 def get_total_keys_count() -> int:
     try:
@@ -55,6 +440,7 @@ def find_and_complete_ton_transaction(payment_id: str, amount_ton: float) -> dic
                 logger.warning(f"TON Webhook: Received payment for unknown or completed payment_id: {payment_id}")
                 return None
             
+            
             cursor.execute(
                 "UPDATE transactions SET status = 'paid', amount_currency = ?, currency_name = 'TON', payment_method = 'TON' WHERE payment_id = ?",
                 (amount_ton, payment_id)
@@ -65,6 +451,39 @@ def find_and_complete_ton_transaction(payment_id: str, amount_ton: float) -> dic
     except sqlite3.Error as e:
         logging.error(f"Failed to complete TON transaction {payment_id}: {e}")
         return None
+
+def get_payment_by_id(payment_id: int) -> dict | None:
+    """
+    Получает данные платежа по ID.
+    Возвращает словарь с ключами:
+    user_id, months, price, host_name, plan_id
+    """
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT user_id, months, price, host_name, plan_id
+                FROM payments
+                WHERE id = ?
+            """, (payment_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            return {
+                "user_id": row["user_id"],
+                "months": row["months"],
+                "price": row["price"],
+                "host_name": row["host_name"],
+                "plan_id": row["plan_id"]
+            }
+    except sqlite3.Error as e:
+        logger.error(f"Failed to get payment by id {payment_id}: {e}")
+        return None
+
 
 def log_transaction(username: str, transaction_id: str | None, payment_id: str | None, user_id: int, status: str, amount_rub: float, amount_currency: float | None, currency_name: str | None, payment_method: str, metadata: str):
     try:
@@ -79,6 +498,7 @@ def log_transaction(username: str, transaction_id: str | None, payment_id: str |
             conn.commit()
     except sqlite3.Error as e:
         logging.error(f"Failed to log transaction for user {user_id}: {e}")
+
 def get_payment_by_id(payment_id: int) -> dict | None:
     """
     Возвращает словарь с user_id, months, price, host_name, plan_id
@@ -114,7 +534,6 @@ def get_payment_by_id(payment_id: int) -> dict | None:
     except sqlite3.Error as e:
         logger.error(f"Failed to get payment by id {payment_id}: {e}")
         return None
-
 
 def get_paginated_transactions(page: int = 1, per_page: int = 15) -> tuple[list[dict], int]:
     offset = (page - 1) * per_page
@@ -285,6 +704,7 @@ def get_daily_stats_for_charts(days: int = 30) -> dict:
         logging.error(f"Failed to get daily stats for charts: {e}")
     return stats
 
+
 def get_recent_transactions(limit: int = 15) -> list[dict]:
     transactions = []
     try:
@@ -308,38 +728,6 @@ def get_recent_transactions(limit: int = 15) -> list[dict]:
     except sqlite3.Error as e:
         logging.error(f"Failed to get recent transactions: {e}")
     return transactions
-
-def get_payment_by_id(payment_id: int) -> dict | None:
-    """
-    Получает данные платежа по ID.
-    Возвращает словарь с ключами:
-    user_id, months, price, host_name, plan_id
-    """
-    try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT user_id, months, price, host_name, plan_id
-                FROM payments
-                WHERE id = ?
-            """, (payment_id,))
-            
-            row = cursor.fetchone()
-            if not row:
-                return None
-
-            return {
-                "user_id": row["user_id"],
-                "months": row["months"],
-                "price": row["price"],
-                "host_name": row["host_name"],
-                "plan_id": row["plan_id"]
-            }
-    except sqlite3.Error as e:
-        logger.error(f"Failed to get payment by id {payment_id}: {e}")
-        return None
 
 def get_all_users() -> list[dict]:
     try:
