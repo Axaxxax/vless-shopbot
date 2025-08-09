@@ -21,7 +21,7 @@ from shop_bot.data_manager.database import (
     get_total_keys_count, get_total_spent_sum, get_daily_stats_for_charts,
     get_recent_transactions, get_paginated_transactions, get_all_users, get_user_keys,
     ban_user, unban_user, delete_user_keys, get_setting, find_and_complete_ton_transaction,
-    get_payment_by_id  # функция для ручного подтверждения платежа
+    get_payment_by_id, create_pending_transaction
 )
 
 _bot_controller = None
@@ -32,7 +32,9 @@ ALL_SETTINGS_KEYS = [
     "telegram_bot_username", "admin_telegram_id", "yookassa_shop_id",
     "yookassa_secret_key", "sbp_enabled", "receipt_email", "cryptobot_token",
     "heleket_merchant_id", "heleket_api_key", "domain", "referral_percentage",
-    "referral_discount", "ton_wallet_address", "tonapi_key", "force_subscription"
+    "referral_discount", "ton_wallet_address", "tonapi_key", "force_subscription",
+    # manual payment settings
+    "manual_payment_enabled", "manual_payment_card_number"
 ]
 
 def create_webhook_app(bot_controller_instance):
@@ -103,7 +105,7 @@ def create_webhook_app(bot_controller_instance):
         per_page = 8
         
         transactions, total_transactions = get_paginated_transactions(page=page, per_page=per_page)
-        total_pages = ceil(total_transactions / per_page)
+        total_pages = ceil(total_transactions / per_page) if total_transactions > 0 else 1
         
         chart_data = get_daily_stats_for_charts(days=30)
         common_data = get_common_template_data()
@@ -138,7 +140,7 @@ def create_webhook_app(bot_controller_instance):
             for key in ALL_SETTINGS_KEYS:
                 if key == 'panel_password': 
                     continue
-                if key in ['sbp_enabled', 'force_subscription']:
+                if key in ['sbp_enabled', 'force_subscription', 'manual_payment_enabled']:
                     value = 'true' if key in request.form else 'false'
                     update_setting(key, value)
                 elif key in request.form:
@@ -275,6 +277,8 @@ def create_webhook_app(bot_controller_instance):
 
             if bot and loop and loop.is_running():
                 asyncio.run_coroutine_threadsafe(payment_processor(bot, metadata), loop)
+                # Обновим статус в БД: (делается внутри create_pending_transaction/внешней логики при webhook-е,
+                # но здесь для ручного подтверждения можно логически ожидать, что статус поменяется при внешнем обработчике)
                 flash(f"Платёж {payment_id} подтверждён, ключ выдан.", "success")
             else:
                 flash("Бот или event loop не запущен, оплата не обработана.", "danger")
