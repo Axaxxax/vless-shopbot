@@ -11,6 +11,8 @@ DB_FILE = PROJECT_ROOT / "users.db"
 
 def initialize_db():
     try:
+        # ensure folder exists
+        PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -39,7 +41,7 @@ def initialize_db():
                 CREATE TABLE IF NOT EXISTS transactions (
                     username TEXT,
                     transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    payment_id TEXT UNIQUE NOT NULL,
+                    payment_id TEXT UNIQUE,
                     user_id INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     amount_rub REAL NOT NULL,
@@ -74,7 +76,7 @@ def initialize_db():
                     price REAL NOT NULL,
                     FOREIGN KEY (host_name) REFERENCES xui_hosts (host_name)
                 )
-            ''')            
+            ''')
             default_settings = {
                 "panel_login": "admin",
                 "panel_password": "admin",
@@ -100,6 +102,9 @@ def initialize_db():
                 "domain": None,
                 "ton_wallet_address": None,
                 "tonapi_key": None,
+                # manual payment settings
+                "manual_payment_enabled": "false",
+                "manual_payment_card_number": None,
             }
             run_migration()
             for key, value in default_settings.items():
@@ -111,7 +116,7 @@ def initialize_db():
 
 def run_migration():
     if not DB_FILE.exists():
-        logging.error("Users.db database file was not found. There is nothing to migrate.")
+        logging.info("Users.db not found - fresh DB will be created by initialize_db.")
         return
 
     logging.info(f"Starting the migration of the database: {DB_FILE}")
@@ -120,8 +125,7 @@ def run_migration():
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
 
-        logging.info("The migration of the table 'users' ...")
-    
+        # users table migration additions
         cursor.execute("PRAGMA table_info(users)")
         columns = [row[1] for row in cursor.fetchall()]
         
@@ -137,10 +141,7 @@ def run_migration():
         else:
             logging.info(" -> The column 'referral_balance' already exists.")
         
-        logging.info("The table 'users' has been successfully updated.")
-
-        logging.info("The migration of the table 'Transactions' ...")
-
+        # transactions table migration: ensure correct structure
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'")
         table_exists = cursor.fetchone()
 
@@ -148,25 +149,24 @@ def run_migration():
             cursor.execute("PRAGMA table_info(transactions)")
             trans_columns = [row[1] for row in cursor.fetchall()]
             
-            if 'payment_id' in trans_columns and 'status' in trans_columns and 'username' in trans_columns:
-                logging.info("The 'Transactions' table already has a new structure. Migration is not required.")
+            required = {'transaction_id', 'payment_id', 'user_id', 'status', 'amount_rub'}
+            if required.issubset(set(trans_columns)):
+                logging.info("The 'transactions' table already has a compatible structure.")
             else:
                 backup_name = f"transactions_backup_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                logging.warning(f"The old structure of the TRANSACTIONS table was discovered. I rename in '{backup_name}' ...")
+                logging.warning(f"The old structure of the TRANSACTIONS table was discovered. Renaming to '{backup_name}' ...")
                 cursor.execute(f"ALTER TABLE transactions RENAME TO {backup_name}")
-                
-                logging.info("I create a new table 'Transactions' with the correct structure ...")
                 create_new_transactions_table(cursor)
-                logging.info("The new table 'Transactions' has been successfully created. The old data is saved.")
+                logging.info("The new table 'transactions' has been successfully created. The old data is saved.")
         else:
-            logging.info("TRANSACTIONS table was not found. I create a new one ...")
+            logging.info("TRANSACTIONS table was not found. Creating a new one ...")
             create_new_transactions_table(cursor)
-            logging.info("The new table 'Transactions' has been successfully created.")
+            logging.info("The new table 'transactions' has been successfully created.")
 
         conn.commit()
         conn.close()
         
-        logging.info("--- The database is successfully completed! ---")
+        logging.info("--- The database migration completed successfully! ---")
 
     except sqlite3.Error as e:
         logging.error(f"An error occurred during migration: {e}")
@@ -176,7 +176,7 @@ def create_new_transactions_table(cursor: sqlite3.Cursor):
         CREATE TABLE IF NOT EXISTS transactions (
             username TEXT,
             transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            payment_id TEXT UNIQUE NOT NULL,
+            payment_id TEXT UNIQUE,
             user_id INTEGER NOT NULL,
             status TEXT NOT NULL,
             amount_rub REAL NOT NULL,
@@ -187,6 +187,8 @@ def create_new_transactions_table(cursor: sqlite3.Cursor):
             created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+# ... (host/plan functions unchanged) ...
 
 def create_host(name: str, url: str, user: str, passwd: str, inbound: int):
     try:
@@ -415,12 +417,16 @@ def get_total_spent_sum() -> float:
         return 0.0
 
 def create_pending_transaction(payment_id: str, user_id: int, amount_rub: float, metadata: dict) -> int:
+    """
+    Создаёт запись в transactions со статусом 'pending'.
+    Возвращает internal transaction_id (integer primary key).
+    """
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO transactions (payment_id, user_id, status, amount_rub, metadata) VALUES (?, ?, ?, ?, ?)",
-                (payment_id, user_id, 'pending', amount_rub, json.dumps(metadata))
+                "INSERT INTO transactions (payment_id, user_id, status, amount_rub, metadata, payment_method, created_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (payment_id, user_id, 'pending', amount_rub, json.dumps(metadata), metadata.get('payment_method', 'manual'), datetime.now())
             )
             conn.commit()
             return cursor.lastrowid
@@ -440,7 +446,6 @@ def find_and_complete_ton_transaction(payment_id: str, amount_ton: float) -> dic
                 logger.warning(f"TON Webhook: Received payment for unknown or completed payment_id: {payment_id}")
                 return None
             
-            
             cursor.execute(
                 "UPDATE transactions SET status = 'paid', amount_currency = ?, currency_name = 'TON', payment_method = 'TON' WHERE payment_id = ?",
                 (amount_ton, payment_id)
@@ -454,36 +459,48 @@ def find_and_complete_ton_transaction(payment_id: str, amount_ton: float) -> dic
 
 def get_payment_by_id(payment_id: int) -> dict | None:
     """
-    Получает данные платежа по ID.
-    Возвращает словарь с ключами:
-    user_id, months, price, host_name, plan_id
+    Возвращает словарь с user_id, months, price, host_name, plan_id
+    по internal transaction_id (transaction_id).
     """
     try:
         with sqlite3.connect(DB_FILE) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
+
             cursor.execute("""
-                SELECT user_id, months, price, host_name, plan_id
-                FROM payments
-                WHERE id = ?
+                SELECT transaction_id, user_id, amount_rub, metadata
+                FROM transactions
+                WHERE transaction_id = ?
+                LIMIT 1
             """, (payment_id,))
             
             row = cursor.fetchone()
             if not row:
                 return None
 
+            metadata = {}
+            if row['metadata']:
+                try:
+                    metadata = json.loads(row['metadata'])
+                except Exception:
+                    metadata = {}
+
+            # Try to extract months/plan/host from metadata, fallback to None
+            months = metadata.get('months') or metadata.get('period') or None
+            plan_id = metadata.get('plan_id') or None
+            host_name = metadata.get('host_name') or None
+            price = float(row['amount_rub']) if row['amount_rub'] is not None else None
+
             return {
                 "user_id": row["user_id"],
-                "months": row["months"],
-                "price": row["price"],
-                "host_name": row["host_name"],
-                "plan_id": row["plan_id"]
+                "months": int(months) if months is not None else 0,
+                "price": price,
+                "host_name": host_name,
+                "plan_id": plan_id
             }
     except sqlite3.Error as e:
-        logger.error(f"Failed to get payment by id {payment_id}: {e}")
+        logging.error(f"Failed to get payment by id {payment_id}: {e}")
         return None
-
 
 def log_transaction(username: str, transaction_id: str | None, payment_id: str | None, user_id: int, status: str, amount_rub: float, amount_currency: float | None, currency_name: str | None, payment_method: str, metadata: str):
     try:
@@ -499,42 +516,6 @@ def log_transaction(username: str, transaction_id: str | None, payment_id: str |
     except sqlite3.Error as e:
         logging.error(f"Failed to log transaction for user {user_id}: {e}")
 
-def get_payment_by_id(payment_id: int) -> dict | None:
-    """
-    Возвращает словарь с user_id, months, price, host_name, plan_id
-    по ID платежа из таблицы transactions.
-    """
-    try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT 
-                    user_id,
-                    CAST(json_extract(metadata, '$.months') AS INTEGER) AS months,
-                    CAST(amount_rub AS REAL) AS price,
-                    json_extract(metadata, '$.host_name') AS host_name,
-                    json_extract(metadata, '$.plan_id') AS plan_id
-                FROM transactions
-                WHERE id = ?
-                LIMIT 1
-            """, (payment_id,))
-            
-            row = cursor.fetchone()
-            if row:
-                return {
-                    "user_id": row["user_id"],
-                    "months": row["months"],
-                    "price": row["price"],
-                    "host_name": row["host_name"],
-                    "plan_id": row["plan_id"]
-                }
-            return None
-    except sqlite3.Error as e:
-        logger.error(f"Failed to get payment by id {payment_id}: {e}")
-        return None
-
 def get_paginated_transactions(page: int = 1, per_page: int = 15) -> tuple[list[dict], int]:
     offset = (page - 1) * per_page
     transactions = []
@@ -545,13 +526,16 @@ def get_paginated_transactions(page: int = 1, per_page: int = 15) -> tuple[list[
             cursor = conn.cursor()
             
             cursor.execute("SELECT COUNT(*) FROM transactions")
-            total = cursor.fetchone()[0]
+            total = cursor.fetchone()[0] or 0
 
             query = "SELECT * FROM transactions ORDER BY created_date DESC LIMIT ? OFFSET ?"
             cursor.execute(query, (per_page, offset))
             
             for row in cursor.fetchall():
                 transaction_dict = dict(row)
+                
+                # provide convenient id field for templates
+                transaction_dict['id'] = transaction_dict.get('transaction_id')
                 
                 metadata_str = transaction_dict.get('metadata')
                 if metadata_str:
